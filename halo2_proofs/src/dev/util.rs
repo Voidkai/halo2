@@ -73,6 +73,7 @@ pub(super) fn format_value<F: Field>(v: F) -> String {
     }
 }
 
+/*
 pub(super) fn load<'a, F: FieldExt, T: ColumnType, Q: Into<AnyQuery> + Copy>(
     n: i32,
     row: i32,
@@ -85,6 +86,20 @@ pub(super) fn load<'a, F: FieldExt, T: ColumnType, Q: Into<AnyQuery> + Copy>(
         cells[column.index()][resolved_row as usize].into()
     }
 }
+*/
+
+pub(super) fn load_slice<'a, F: FieldExt, T: ColumnType, Q: Into<AnyQuery> + Copy>(
+    n: i32,
+    row: i32,
+    queries: &'a [(Column<T>, Rotation)],
+    cells: &'a [&mut [CellValue<F>]],
+) -> impl Fn(Q) -> Value<F> + 'a {
+    move |query| {
+        let (column, at) = &queries[query.into().index];
+        let resolved_row = (row + at.0 + n) % n;
+        cells[column.index()][resolved_row as usize].into()
+    }
+}
 
 pub(super) fn load_instance<'a, F: FieldExt, T: ColumnType, Q: Into<AnyQuery> + Copy>(
     n: i32,
@@ -94,7 +109,7 @@ pub(super) fn load_instance<'a, F: FieldExt, T: ColumnType, Q: Into<AnyQuery> + 
 ) -> impl Fn(Q) -> Value<F> + 'a {
     move |query| {
         let (column, at) = &queries[query.into().index];
-        let resolved_row = (row + at.0) % n;
+        let resolved_row = (row + at.0 + n) % n;
         Value::Real(cells[column.index()][resolved_row as usize])
     }
 }

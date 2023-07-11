@@ -22,9 +22,9 @@ use super::msm::MSMKZG;
 #[derive(Debug, Clone)]
 pub struct ParamsKZG<E: Engine> {
     pub(crate) k: u32,
-    pub(crate) n: u64,
+    pub n: u64,
     pub(crate) g: Vec<E::G1Affine>,
-    pub(crate) g_lagrange: Vec<E::G1Affine>,
+    pub g_lagrange: Vec<E::G1Affine>,
     pub(crate) g2: E::G2Affine,
     pub(crate) s_g2: E::G2Affine,
 }
@@ -59,6 +59,20 @@ impl<E: Engine + Debug> ParamsKZG<E> {
     /// Initializes parameters for the curve, draws toxic secret from given rng.
     /// MUST NOT be used in production.
     pub fn setup<R: RngCore>(k: u32, rng: R) -> Self {
+        let s = <E::Scalar>::random(rng);
+        Self::unsafe_setup_with_s(k, s)
+    }
+
+    /// Initializes parameters for the curve, Draws random toxic point inside of the function
+    /// MUST NOT be used in production
+    pub fn unsafe_setup(k: u32) -> Self {
+        let s = E::Scalar::random(OsRng);
+        Self::unsafe_setup_with_s(k, s)
+    }
+
+    /// Initializes parameters for the curve, using given random `s`
+    /// MUST NOT be used in production
+    pub fn unsafe_setup_with_s(k: u32, s: <E as Engine>::Scalar) -> Self {
         // Largest root of unity exponent of the Engine is `2^E::Scalar::S`, so we can
         // only support FFTs of polynomials below degree `2^E::Scalar::S`.
         assert!(k <= E::Scalar::S);
@@ -66,12 +80,10 @@ impl<E: Engine + Debug> ParamsKZG<E> {
 
         // Calculate g = [G1, [s] G1, [s^2] G1, ..., [s^(n-1)] G1] in parallel.
         let g1 = E::G1Affine::generator();
-        let s = <E::Scalar>::random(rng);
-
         let mut g_projective = vec![E::G1::group_zero(); n as usize];
         parallelize(&mut g_projective, |g, start| {
             let mut current_g: E::G1 = g1.into();
-            current_g *= s.pow_vartime(&[start as u64]);
+            current_g *= s.pow_vartime([start as u64]);
             for g in g.iter_mut() {
                 *g = current_g;
                 current_g *= s;
@@ -93,11 +105,11 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         }
         let n_inv = Option::<E::Scalar>::from(E::Scalar::from(n).invert())
             .expect("inversion should be ok for n = 1<<k");
-        let multiplier = (s.pow_vartime(&[n as u64]) - E::Scalar::one()) * n_inv;
+        let multiplier = (s.pow_vartime([n as u64]) - E::Scalar::one()) * n_inv;
         parallelize(&mut g_lagrange_projective, |g, start| {
             for (idx, g) in g.iter_mut().enumerate() {
                 let offset = start + idx;
-                let root_pow = root.pow_vartime(&[offset as u64]);
+                let root_pow = root.pow_vartime([offset as u64]);
                 let scalar = multiplier * root_pow * (s - root_pow).invert().unwrap();
                 *g = g1 * scalar;
             }

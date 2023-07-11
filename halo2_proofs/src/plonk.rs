@@ -8,6 +8,7 @@
 use blake2b_simd::Params as Blake2bParams;
 use ff::PrimeField;
 use group::ff::Field;
+use halo2curves::pairing::Engine;
 
 use crate::arithmetic::{CurveAffine, FieldExt};
 use crate::helpers::{
@@ -55,7 +56,7 @@ pub struct VerifyingKey<C: CurveAffine> {
     cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
     transcript_repr: C::Scalar,
-    selectors: Vec<Vec<bool>>,
+    //selectors: Vec<Vec<bool>>,
 }
 
 impl<C: SerdeCurveAffine> VerifyingKey<C>
@@ -78,7 +79,7 @@ where
             commitment.write(writer, format)?;
         }
         self.permutation.write(writer, format)?;
-
+        /*
         // write self.selectors
         for selector in &self.selectors {
             // since `selector` is filled with `bool`, we pack them 8 at a time into bytes and then write
@@ -86,6 +87,7 @@ where
                 writer.write_all(&[crate::helpers::pack(bits)])?;
             }
         }
+        */
         Ok(())
     }
 
@@ -117,6 +119,7 @@ where
 
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation, format)?;
 
+        /*
         // read selectors
         let selectors: Vec<Vec<bool>> = vec![vec![false; 1 << k]; cs.num_selectors]
             .into_iter()
@@ -130,13 +133,13 @@ where
             })
             .collect::<io::Result<_>>()?;
         let (cs, _) = cs.compress_selectors(selectors.clone());
-
+        */
         Ok(Self::from_parts(
             domain,
             fixed_commitments,
             permutation,
             cs,
-            selectors,
+            //selectors,
         ))
     }
 
@@ -160,12 +163,14 @@ impl<C: CurveAffine> VerifyingKey<C> {
     fn bytes_length(&self) -> usize {
         8 + (self.fixed_commitments.len() * C::default().to_bytes().as_ref().len())
             + self.permutation.bytes_length()
-            + self.selectors.len()
-                * (self
-                    .selectors
-                    .get(0)
-                    .map(|selector| selector.len() / 8 + 1)
-                    .unwrap_or(0))
+        /*
+        + self.selectors.len()
+            * (self
+                .selectors
+                .get(0)
+                .map(|selector| selector.len() / 8 + 1)
+                .unwrap_or(0))
+                */
     }
 
     fn from_parts(
@@ -173,7 +178,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
         fixed_commitments: Vec<C>,
         permutation: permutation::VerifyingKey<C>,
         cs: ConstraintSystem<C::Scalar>,
-        selectors: Vec<Vec<bool>>,
+        //selectors: Vec<Vec<bool>>,
     ) -> Self {
         // Compute cached values.
         let cs_degree = cs.degree();
@@ -186,7 +191,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
             cs_degree,
             // Temporary, this is not pinned.
             transcript_repr: C::Scalar::zero(),
-            selectors,
+            //selectors,
         };
 
         let mut hasher = Blake2bParams::new()
@@ -261,12 +266,11 @@ pub struct PinnedVerificationKey<'a, C: CurveAffine> {
 #[derive(Clone, Debug)]
 pub struct ProvingKey<C: CurveAffine> {
     vk: VerifyingKey<C>,
-    l0: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
-    l_last: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
-    l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    l0: Polynomial<C::Scalar, Coeff>,
+    l_last: Polynomial<C::Scalar, Coeff>,
+    l_active_row: Polynomial<C::Scalar, Coeff>,
     fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
-    fixed_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     permutation: permutation::ProvingKey<C>,
     ev: Evaluator<C>,
 }
@@ -285,7 +289,7 @@ impl<C: CurveAffine> ProvingKey<C> {
             + scalar_len * (self.l0.len() + self.l_last.len() + self.l_active_row.len())
             + polynomial_slice_byte_length(&self.fixed_values)
             + polynomial_slice_byte_length(&self.fixed_polys)
-            + polynomial_slice_byte_length(&self.fixed_cosets)
+            //+ polynomial_slice_byte_length(&self.fixed_cosets)
             + self.permutation.bytes_length()
     }
 }
@@ -311,7 +315,7 @@ where
         self.l_active_row.write(writer, format)?;
         write_polynomial_slice(&self.fixed_values, writer, format)?;
         write_polynomial_slice(&self.fixed_polys, writer, format)?;
-        write_polynomial_slice(&self.fixed_cosets, writer, format)?;
+        //write_polynomial_slice(&self.fixed_cosets, writer, format)?;
         self.permutation.write(writer, format)?;
         Ok(())
     }
@@ -337,7 +341,7 @@ where
         let l_active_row = Polynomial::read(reader, format)?;
         let fixed_values = read_polynomial_vec(reader, format)?;
         let fixed_polys = read_polynomial_vec(reader, format)?;
-        let fixed_cosets = read_polynomial_vec(reader, format)?;
+        //let fixed_cosets = read_polynomial_vec(reader, format)?;
         let permutation = permutation::ProvingKey::read(reader, format)?;
         let ev = Evaluator::new(vk.cs());
         Ok(Self {
@@ -347,7 +351,7 @@ where
             l_active_row,
             fixed_values,
             fixed_polys,
-            fixed_cosets,
+            //fixed_cosets,
             permutation,
             ev,
         })

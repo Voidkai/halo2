@@ -11,6 +11,9 @@ use halo2curves::{Coordinates, CurveAffine, FieldExt};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 
+mod poseidon;
+pub use self::poseidon::{PoseidonRead, PoseidonWrite};
+
 /// Prefix to a prover's message soliciting a challenge
 const BLAKE2B_PREFIX_CHALLENGE: u8 = 0;
 

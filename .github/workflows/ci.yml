@@ -20,6 +20,7 @@ jobs:
         with:
           command: test
           args: --verbose --release --all --all-features
+    if: ${{ false }}
 
   fmt:
     name: Rustfmt

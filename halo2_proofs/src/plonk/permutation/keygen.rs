@@ -12,7 +12,7 @@ use crate::{
 };
 
 /// Struct that accumulates all the necessary data in order to construct the permutation argument.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Assembly {
     /// Columns that participate on the copy permutation argument.
     pub columns: Vec<Column<Any>>,
@@ -113,7 +113,7 @@ impl Assembly {
         {
             let omega = domain.get_omega();
             parallelize(&mut omega_powers, |o, start| {
-                let mut cur = omega.pow_vartime(&[start as u64]);
+                let mut cur = omega.pow_vartime([start as u64]);
                 for v in o.iter_mut() {
                     *v = cur;
                     cur *= &omega;
@@ -175,7 +175,7 @@ impl Assembly {
         {
             let omega = domain.get_omega();
             parallelize(&mut omega_powers, |o, start| {
-                let mut cur = omega.pow_vartime(&[start as u64]);
+                let mut cur = omega.pow_vartime([start as u64]);
                 for v in o.iter_mut() {
                     *v = cur;
                     cur *= &omega;
@@ -197,7 +197,7 @@ impl Assembly {
             });
         }
 
-        // Compute permutation polynomials, convert to coset form.
+        // Compute permutation polynomials.
         let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
         {
             parallelize(&mut permutations, |o, start| {
@@ -236,7 +236,6 @@ impl Assembly {
         ProvingKey {
             permutations,
             polys,
-            cosets,
         }
     }
 }

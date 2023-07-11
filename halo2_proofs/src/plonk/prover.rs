@@ -4,8 +4,9 @@ use halo2curves::CurveExt;
 use rand_core::RngCore;
 use std::collections::BTreeSet;
 use std::env::var;
-use std::ops::RangeTo;
+use std::ops::{Range, RangeTo};
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, iter, mem, sync::atomic::Ordering};
 
@@ -27,6 +28,7 @@ use crate::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
         Basis, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, ProverQuery,
     },
+    two_dim_vec_to_vec_of_slice,
 };
 use crate::{
     poly::batch_invert_assigned,
@@ -140,9 +142,11 @@ pub fn create_proof<
     struct WitnessCollection<'a, F: Field> {
         k: u32,
         current_phase: sealed::Phase,
-        advice: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
+        advice_vec: Arc<Vec<Polynomial<Assigned<F>, LagrangeCoeff>>>,
+        advice: Vec<&'a mut [Assigned<F>]>,
         challenges: &'a HashMap<usize, F>,
         instances: &'a [&'a [F]],
+        rw_rows: Range<usize>,
         usable_rows: RangeTo<usize>,
         _marker: std::marker::PhantomData<F>,
     }
@@ -167,6 +171,74 @@ pub fn create_proof<
         {
             // We only care about advice columns here
 
+            Ok(())
+        }
+
+        fn fork(&mut self, ranges: &[Range<usize>]) -> Result<Vec<Self>, Error> {
+            let mut range_start = self.rw_rows.start;
+            for (i, sub_range) in ranges.iter().enumerate() {
+                if sub_range.start < range_start {
+                    log::error!(
+                        "subCS_{} sub_range.start: {} < range_start{}",
+                        i,
+                        sub_range.start,
+                        range_start
+                    );
+                    return Err(Error::Synthesis);
+                }
+                if i == ranges.len() - 1 && sub_range.end > self.rw_rows.end {
+                    log::error!(
+                        "subCS_{} sub_range.end: {} > self.rw_rows.end{}",
+                        i,
+                        sub_range.end,
+                        self.rw_rows.end
+                    );
+                    return Err(Error::Synthesis);
+                }
+                range_start = sub_range.end;
+                log::debug!(
+                    "subCS_{} rw_rows: {}..{}",
+                    i,
+                    sub_range.start,
+                    sub_range.end
+                );
+            }
+
+            let advice_ptrs = self
+                .advice
+                .iter_mut()
+                .map(|vec| vec.as_mut_ptr())
+                .collect::<Vec<_>>();
+
+            let mut sub_cs = vec![];
+            for sub_range in ranges {
+                let advice = advice_ptrs
+                    .iter()
+                    .map(|ptr| unsafe {
+                        std::slice::from_raw_parts_mut(
+                            ptr.add(sub_range.start),
+                            sub_range.end - sub_range.start,
+                        )
+                    })
+                    .collect::<Vec<&mut [Assigned<F>]>>();
+
+                sub_cs.push(Self {
+                    k: 0,
+                    current_phase: self.current_phase,
+                    advice_vec: self.advice_vec.clone(),
+                    advice,
+                    challenges: self.challenges,
+                    instances: self.instances,
+                    rw_rows: sub_range.clone(),
+                    usable_rows: self.usable_rows,
+                    _marker: Default::default(),
+                });
+            }
+
+            Ok(sub_cs)
+        }
+
+        fn merge(&mut self, _sub_cs: Vec<Self>) -> Result<(), Error> {
             Ok(())
         }
 
@@ -204,7 +276,7 @@ pub fn create_proof<
             AR: Into<String>,
         {
             // Ignore assignment of advice column in different phase than current one.
-            if self.current_phase != column.column_type().phase {
+            if self.current_phase.0 < column.column_type().phase.0 {
                 return Ok(());
             }
 
@@ -212,10 +284,15 @@ pub fn create_proof<
                 return Err(Error::not_enough_rows_available(self.k));
             }
 
+            if !self.rw_rows.contains(&row) {
+                log::error!("assign_advice: {:?}, row: {}", column, row);
+                return Err(Error::Synthesis);
+            }
+
             *self
                 .advice
                 .get_mut(column.index())
-                .and_then(|v| v.get_mut(row))
+                .and_then(|v| v.get_mut(row - self.rw_rows.start))
                 .ok_or(Error::BoundsFailure)? = to().into_field().assign()?;
 
             Ok(())
@@ -289,6 +366,9 @@ pub fn create_proof<
             };
             instances.len()
         ];
+        #[cfg(feature = "phase-check")]
+        let mut advice_assignments =
+            vec![vec![domain.empty_lagrange_assigned(); meta.num_advice_columns]; instances.len()];
         let mut challenges = HashMap::<usize, Scheme::Scalar>::with_capacity(meta.num_challenges);
 
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
@@ -306,13 +386,22 @@ pub fn create_proof<
                 })
                 .collect::<BTreeSet<_>>();
 
-            for ((circuit, advice), instances) in
-                circuits.iter().zip(advice.iter_mut()).zip(instances)
+            for (circuit_idx, ((circuit, advice), instances)) in circuits
+                .iter()
+                .zip(advice.iter_mut())
+                .zip(instances)
+                .enumerate()
             {
+                let advice_vec = Arc::new(vec![
+                    domain.empty_lagrange_assigned();
+                    meta.num_advice_columns
+                ]);
+                let advice_slice = two_dim_vec_to_vec_of_slice!(advice_vec);
                 let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
-                    advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+                    advice_vec,
+                    advice: advice_slice,
                     instances,
                     challenges: &challenges,
                     // The prover will not be allowed to assign values to advice
@@ -320,6 +409,7 @@ pub fn create_proof<
                     // number of blinding factors and an extra row for use in the
                     // permutation argument.
                     usable_rows: ..unusable_rows_start,
+                    rw_rows: 0..unusable_rows_start,
                     _marker: std::marker::PhantomData,
                 };
 
@@ -331,13 +421,33 @@ pub fn create_proof<
                     meta.constants.clone(),
                 )?;
 
+                #[cfg(feature = "phase-check")]
+                {
+                    for (idx, advice_col) in witness.advice_vec.iter().enumerate() {
+                        if pk.vk.cs.advice_column_phase[idx].0 < current_phase.0
+                            && advice_assignments[circuit_idx][idx].values != advice_col.values
+                        {
+                            log::error!(
+                                "advice column {}(at {:?}) changed when {:?}",
+                                idx,
+                                pk.vk.cs.advice_column_phase[idx],
+                                current_phase
+                            );
+                        }
+                    }
+                }
+
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
-                    witness
-                        .advice
+                    Arc::try_unwrap(witness.advice_vec)
+                        .expect("there must only one Arc for advice_vec")
                         .into_iter()
                         .enumerate()
                         .filter_map(|(column_index, advice)| {
                             if column_indices.contains(&column_index) {
+                                #[cfg(feature = "phase-check")]
+                                {
+                                    advice_assignments[circuit_idx][column_index] = advice.clone();
+                                }
                                 Some(advice)
                             } else {
                                 None
@@ -348,9 +458,12 @@ pub fn create_proof<
 
                 // Add blinding factors to advice columns
                 for advice_values in &mut advice_values {
-                    for cell in &mut advice_values[unusable_rows_start..] {
-                        *cell = Scheme::Scalar::random(&mut rng);
-                    }
+                    //for cell in &mut advice_values[unusable_rows_start..] {
+                    //*cell = C::Scalar::random(&mut rng);
+                    //*cell = C::Scalar::one();
+                    //}
+                    let idx = advice_values.len() - 1;
+                    advice_values[idx] = Scheme::Scalar::one();
                 }
 
                 // Compute commitments to advice column polynomials

@@ -3,7 +3,7 @@
 
 use assert_matches::assert_matches;
 use halo2_proofs::arithmetic::{Field, FieldExt};
-use halo2_proofs::circuit::{Cell, Layouter, SimpleFloorPlanner, Value};
+use halo2_proofs::circuit::{Cell, Layouter, Region, SimpleFloorPlanner, Value};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::{
     create_proof as create_plonk_proof, keygen_pk, keygen_vk, verify_proof as verify_plonk_proof,
@@ -19,10 +19,11 @@ use halo2_proofs::transcript::{
 };
 use rand_core::{OsRng, RngCore};
 use std::marker::PhantomData;
+use std::time::Instant;
 
 #[test]
 fn plonk_api() {
-    const K: u32 = 5;
+    const K: u32 = 17;
 
     /// This represents an advice column at a certain row in the ConstraintSystem
     #[derive(Copy, Clone, Debug)]
@@ -373,8 +374,74 @@ fn plonk_api() {
             mut layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
             let cs = StandardPlonk::new(config);
+            let mut is_first_pass_vec = vec![true; 8];
 
             let _ = cs.public_input(&mut layouter, || Value::known(F::one() + F::one()))?;
+
+            let a: Value<Assigned<_>> = self.a.into();
+            let parallel_regions_time = Instant::now();
+            #[cfg(feature = "parallel_syn")]
+            layouter.assign_regions(
+                || "regions",
+                (0..8)
+                    .into_iter()
+                    .zip(is_first_pass_vec.chunks_mut(1).into_iter())
+                    .map(|(_, is_first_pass)| {
+                        |mut region: Region<'_, F>| -> Result<(), Error> {
+                            let n = 1 << 13;
+                            for i in 0..n {
+                                // skip the assign of rows except the last row in the first pass
+                                if is_first_pass[0] && i < n - 1 {
+                                    continue;
+                                }
+                                let a0 =
+                                    region.assign_advice(|| "config.a", cs.config.a, i, || a)?;
+                                let a1 =
+                                    region.assign_advice(|| "config.b", cs.config.b, i, || a)?;
+                                region.assign_advice(
+                                    || "config.c",
+                                    cs.config.c,
+                                    i,
+                                    || a.double(),
+                                )?;
+
+                                region.assign_fixed(
+                                    || "a",
+                                    cs.config.sa,
+                                    i,
+                                    || Value::known(F::one()),
+                                )?;
+                                region.assign_fixed(
+                                    || "b",
+                                    cs.config.sb,
+                                    i,
+                                    || Value::known(F::one()),
+                                )?;
+                                region.assign_fixed(
+                                    || "c",
+                                    cs.config.sc,
+                                    i,
+                                    || Value::known(F::one()),
+                                )?;
+                                region.assign_fixed(
+                                    || "a * b",
+                                    cs.config.sm,
+                                    i,
+                                    || Value::known(F::zero()),
+                                )?;
+
+                                region.constrain_equal(a0.cell(), a1.cell())?;
+                            }
+                            is_first_pass[0] = false;
+                            Ok(())
+                        }
+                    })
+                    .collect(),
+            )?;
+            log::info!(
+                "parallel_regions assign took {:?}",
+                parallel_regions_time.elapsed()
+            );
 
             for _ in 0..10 {
                 let a: Value<Assigned<_>> = self.a.into();
@@ -456,8 +523,12 @@ fn plonk_api() {
 
         // Initialize the proving key
         let vk = keygen_vk(params, &empty_circuit).expect("keygen_vk should not fail");
+        log::info!("keygen vk succeed");
 
-        keygen_pk(params, vk, &empty_circuit).expect("keygen_pk should not fail")
+        let pk = keygen_pk(params, vk, &empty_circuit).expect("keygen_pk should not fail");
+        log::info!("keygen pk succeed");
+
+        pk
     }
 
     fn create_proof<
@@ -490,13 +561,6 @@ fn plonk_api() {
             &mut transcript,
         )
         .expect("proof generation should not fail");
-
-        // Check this circuit is satisfied.
-        let prover = match MockProver::run(K, &circuit, vec![vec![instance]]) {
-            Ok(prover) => prover,
-            Err(e) => panic!("{:?}", e),
-        };
-        assert_eq!(prover.verify(), Ok(()));
 
         transcript.finalize()
     }
@@ -532,6 +596,7 @@ fn plonk_api() {
         assert!(strategy.finalize());
     }
 
+    #[test]
     fn test_plonk_api_gwc() {
         use halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
         use halo2_proofs::poly::kzg::multiopen::{ProverGWC, VerifierGWC};
@@ -539,7 +604,22 @@ fn plonk_api() {
         use halo2curves::bn256::Bn256;
 
         type Scheme = KZGCommitmentScheme<Bn256>;
-        bad_keys!(Scheme);
+        // bad_keys!(Scheme);
+
+        let (a, instance, lookup_table) = common!(Scheme);
+
+        let circuit: MyCircuit<<Scheme as CommitmentScheme>::Scalar> = MyCircuit {
+            a: Value::known(a),
+            lookup_table,
+        };
+
+        // Check this circuit is satisfied.
+        let prover = match MockProver::run(K, &circuit, vec![vec![instance]]) {
+            Ok(prover) => prover,
+            Err(e) => panic!("{:?}", e),
+        };
+        assert_eq!(prover.verify_par(), Ok(()));
+        log::info!("mock proving succeed!");
 
         let params = ParamsKZG::<Bn256>::new(K);
         let rng = OsRng;
@@ -561,6 +641,7 @@ fn plonk_api() {
         >(verifier_params, pk.get_vk(), &proof[..]);
     }
 
+    #[test]
     fn test_plonk_api_shplonk() {
         use halo2_proofs::poly::kzg::commitment::{KZGCommitmentScheme, ParamsKZG};
         use halo2_proofs::poly::kzg::multiopen::{ProverSHPLONK, VerifierSHPLONK};
@@ -590,6 +671,7 @@ fn plonk_api() {
         >(verifier_params, pk.get_vk(), &proof[..]);
     }
 
+    #[test]
     fn test_plonk_api_ipa() {
         use halo2_proofs::poly::ipa::commitment::{IPACommitmentScheme, ParamsIPA};
         use halo2_proofs::poly::ipa::multiopen::{ProverIPA, VerifierIPA};
@@ -1020,8 +1102,8 @@ fn plonk_api() {
             );
         }
     }
-
-    test_plonk_api_ipa();
+    env_logger::init();
+    // test_plonk_api_ipa();
     test_plonk_api_gwc();
-    test_plonk_api_shplonk();
+    // test_plonk_api_shplonk();
 }

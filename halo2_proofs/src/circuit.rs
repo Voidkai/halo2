@@ -12,6 +12,7 @@ use crate::{
 };
 
 mod value;
+pub(crate) use value::value_dev;
 pub use value::Value;
 
 pub mod floor_planner;
@@ -51,8 +52,8 @@ pub trait Chip<F: FieldExt>: Sized {
 }
 
 /// Index of a region in a layouter
-#[derive(Clone, Copy, Debug)]
-pub struct RegionIndex(usize);
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RegionIndex(pub usize);
 
 impl From<usize> for RegionIndex {
     fn from(idx: usize) -> RegionIndex {
@@ -87,14 +88,14 @@ impl std::ops::Deref for RegionStart {
 }
 
 /// A pointer to a cell within a circuit.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cell {
     /// Identifies the region in which this cell resides.
-    region_index: RegionIndex,
+    pub region_index: RegionIndex,
     /// The relative offset of this cell within its region.
-    row_offset: usize,
+    pub row_offset: usize,
     /// The column of this cell.
-    column: Column<Any>,
+    pub column: Column<Any>,
 }
 
 /// An assigned cell.
@@ -434,6 +435,18 @@ pub trait Layouter<F: Field> {
         N: Fn() -> NR,
         NR: Into<String>;
 
+    #[cfg(feature = "parallel_syn")]
+    fn assign_regions<A, AR, N, NR>(
+        &mut self,
+        name: N,
+        assignments: Vec<A>,
+    ) -> Result<Vec<AR>, Error>
+    where
+        A: FnMut(Region<'_, F>) -> Result<AR, Error> + Send,
+        AR: Send,
+        N: Fn() -> NR,
+        NR: Into<String>;
+
     /// Assign a table region to an absolute row number.
     ///
     /// ```ignore
@@ -507,6 +520,21 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         NR: Into<String>,
     {
         self.0.assign_region(name, assignment)
+    }
+
+    #[cfg(feature = "parallel_syn")]
+    fn assign_regions<A, AR, N, NR>(
+        &mut self,
+        name: N,
+        assignments: Vec<A>,
+    ) -> Result<Vec<AR>, Error>
+    where
+        A: FnMut(Region<'_, F>) -> Result<AR, Error> + Send,
+        AR: Send,
+        N: Fn() -> NR,
+        NR: Into<String>,
+    {
+        self.0.assign_regions(name, assignments)
     }
 
     fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
